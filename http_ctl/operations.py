@@ -74,18 +74,25 @@ def ui_hierarchy(adb):
     """
     directory = '/data/local/tmp/http-ctl-ui-' + uuid.uuid4().hex
     marker = '.owned-' + uuid.uuid4().hex
-    argv = [adb, '-s', 'localhost:5555', 'exec-out', 'sh', '-c']
+    # exec-out handles multiple argv differently across ADB versions. Supply
+    # one complete shell command, with the fixed script quoted exactly once.
+    argv = [adb, '-s', 'localhost:5555', 'exec-out']
     # Android's sh/timeout/uiautomator are existing system tools, not installers.
-    # The remote file-size limit is at most 1 MiB (shell units may be 512 bytes).
+    # Do not apply RLIMIT_FSIZE to ART: it also limits runtime cache/memfd
+    # files and prevents startup. XML is checked before reading and bounded
+    # on capture, but temporary disk usage while the trusted producer writes
+    # is bounded by runtime/cleanup, not a hard per-file quota.
     script = '\n'.join([
         'umask 077', 'd=' + shlex.quote(directory), 'marker=' + shlex.quote(marker),
         'mkdir -m 700 "$d" || exit 1',
         '(set -C; : > "$d/$marker") || exit 1',
         'cleanup() { rm -f "$d/hierarchy.xml" "$d/$marker"; rmdir "$d"; }',
         'trap cleanup EXIT', "trap 'exit 1' HUP INT TERM",
-        'ulimit -f 1024 || exit 1',
         'timeout -s KILL 20 uiautomator dump --compressed "$d/hierarchy.xml" >/dev/null 2>/dev/null || exit 1',
         'test -f "$d/hierarchy.xml" && test ! -L "$d/hierarchy.xml" || exit 1',
+        'size=$(stat -c %s "$d/hierarchy.xml") || exit 1',
+        "case $size in ''|*[!0-9]*) exit 1 ;; esac",
+        'test "$size" -gt 0 && test "$size" -le 1048576 || exit 1',
         'cat "$d/hierarchy.xml"',
     ])
     cleanup = '\n'.join([
@@ -93,16 +100,18 @@ def ui_hierarchy(adb):
         'if test -d "$d" && test ! -L "$d"; then',
         '  test -f "$d/$marker" && test ! -L "$d/$marker" || exit 1',
         '  rm -f "$d/hierarchy.xml" "$d/$marker" && rmdir "$d"',
-        'else test ! -e "$d" && test ! -L "$d"; fi',
+        'else test ! -e "$d" && test ! -L "$d"; fi || exit 1',
+        "printf 'HTTP_CTL_UI_CLEANUP_OK\\n'",
     ])
     try:
-        code, out, _, timed, truncated = run_bounded(argv + [shlex.quote(script)], 25, output_limit=MAX_HIERARCHY)
+        code, out, _, timed, truncated = run_bounded(argv + ['sh -c ' + shlex.quote(script)], 25, output_limit=MAX_HIERARCHY)
         if code or timed or truncated:
             raise ValueError('hierarchy unavailable')
         result = validate_hierarchy(out)
     finally:
-        code, _, _, timed, truncated = run_bounded(argv + [shlex.quote(cleanup)], 5, output_limit=4096)
-        if code or timed or truncated:
+        code, cleaned, _, timed, truncated = run_bounded(argv + ['sh -c ' + shlex.quote(cleanup)], 5, output_limit=4096)
+        # exec-out can return host status zero for a failed remote command.
+        if code or timed or truncated or cleaned != b'HTTP_CTL_UI_CLEANUP_OK\n':
             raise ValueError('hierarchy cleanup unavailable')
     return result
 

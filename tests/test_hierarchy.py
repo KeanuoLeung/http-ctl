@@ -37,7 +37,7 @@ def mocked_adb(monkeypatch, result=(0, XML, b'', False, False)):
             if isinstance(result, BaseException):
                 raise result
             return result
-        return 0, b'', b'', False, False
+        return 0, b'HTTP_CTL_UI_CLEANUP_OK\n', b'', False, False
 
     monkeypatch.setattr(operations, 'run_bounded', run)
     return calls
@@ -53,9 +53,10 @@ def assert_bounded_commands(calls):
     assert calls[0][1] <= 30
     assert calls[1][1] <= 5
     for command in (main, cleanup):
-        assert command[3:6] == ['exec-out', 'sh', '-c']
-        assert len(command) == 7
-        assert len(shlex.split(command[-1])) == 1  # Exactly one remotely quoted script.
+        assert command[3] == 'exec-out'
+        assert len(command) == 5
+        assert shlex.split(command[-1])[:2] == ['sh', '-c']
+        assert len(shlex.split(command[-1])) == 3  # One complete command, one script.
     # Both calls contain exactly the same, generated server-owned directory.
     paths = set(re.findall(r'/data/local/tmp/http-ctl-ui-[0-9a-f]{32}', main[-1]))
     assert len(paths) == 1
@@ -64,7 +65,9 @@ def assert_bounded_commands(calls):
     assert 'trap ' in main[-1]
     assert 'umask 077' in main[-1]
     assert re.search(r'mkdir\s+-m\s+0?700\s+', main[-1])
-    assert 'ulimit' in main[-1]
+    assert 'ulimit' not in main[-1]
+    assert 'stat -c %s' in main[-1]
+    assert '-le 1048576' in main[-1]
     assert 'timeout ' in main[-1]
     assert 'uiautomator dump' in main[-1]
     assert 'rmdir' in ' '.join(cleanup)
@@ -476,7 +479,7 @@ def local_scripts(monkeypatch, tmp_path):
     calls = mocked_adb(monkeypatch)
     operations.ui_hierarchy(ADB)
     directory = assert_bounded_commands(calls)
-    scripts = [shlex.split(call[0][-1])[0] for call in calls]
+    scripts = [shlex.split(call[0][-1])[2] for call in calls]
     markers = [set(re.findall(r'\.owned-[0-9a-f]{32}', script)) for script in scripts]
     assert len(markers[0]) == 1
     assert markers[0] == markers[1]
