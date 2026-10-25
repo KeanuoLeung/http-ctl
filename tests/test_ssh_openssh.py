@@ -197,6 +197,11 @@ LogLevel VERBOSE
                 tls_server.server_close()
             for log in logs:
                 log.close()
+            # Captured by pytest; displayed only for failed tests. Keep output
+            # bounded and limited to this ephemeral, loopback-only daemon.
+            sshd_log = d / 'sshd.log'
+            if sshd_log.exists():
+                print('\nIsolated test sshd diagnostics:\n' + sshd_log.read_text(errors='replace')[-16000:])
 
 
 
