@@ -178,6 +178,8 @@ LogLevel VERBOSE
                 proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=ROOT, start_new_session=True)
                 try:
                     stdout, stderr = proc.communicate(input=input, timeout=timeout)
+                    if proc.returncode == 255:
+                        stderr += b"\nIsolated test sshd diagnostics:\n" + (d / "sshd.log").read_bytes()[-16000:]
                     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
                 finally:
                     with contextlib.suppress(ProcessLookupError):
