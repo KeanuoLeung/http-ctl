@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit run script for http-ctl on Termux (phone deployment).
+# Mirror of the tunnel-watchdog service: Termux sh, exec python3.
+# Install: mkdir -p $PREFIX/var/service/ctl-server && cp this to
+# $PREFIX/var/service/ctl-server/run && chmod +x it, then `sv up ctl-server`.
+exec 2>&1
+export HOME=/data/data/com.termux/files/home
+export PATH=/data/data/com.termux/files/usr/bin:/system/bin:$PATH
+export TMPDIR=/data/data/com.termux/files/usr/tmp
+export CTL_HOST=127.0.0.1
+export CTL_PORT=18081
+export CTL_TOKEN_FILE=$HOME/.config/http-ctl/token
+exec python3 $HOME/pixel-server/ctl-server.py

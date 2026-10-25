@@ -1,0 +1,19 @@
+[Unit]
+Description=http-ctl control daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+ExecStart=/usr/bin/python3 /opt/http-ctl/ctl-server.py
+Environment=CTL_HOST=127.0.0.1
+Environment=CTL_PORT=18081
+Environment=CTL_TOKEN_FILE=/home/YOUR_USER/.config/http-ctl/token
+Restart=always
+RestartSec=5
+# The daemon binds loopback only; no network-facing hardening needed
+# beyond running as an unprivileged user. Keep the token file 600.
+
+[Install]
+WantedBy=multi-user.target
