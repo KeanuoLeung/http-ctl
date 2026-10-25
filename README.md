@@ -95,6 +95,8 @@ Dump output is limited to 1 MiB, 10,000 XML elements, and 100 levels. DTD/entity
 
 A deployment with only health/screenshot/UI scopes cannot remotely install updates. Use an already authorized local Termux/administrative route; do not revive the disabled bearer token, grant shell/file access silently, or type shell commands through the UI to evade the scope boundary.
 
+For an already migrated signed-v2 Termux installation with unchanged dependencies, the [local package-only update guide](examples/termux-package-update.md) preserves configuration and the existing venv, tests a disabled-key sidecar, and retains the previous signed-v2 package for recovery. It must be run locally, not through the service being replaced.
+
 ## Application signature transport
 
 The client sends its signature in `X-Http-Ctl-Signature` and `X-Http-Ctl-Signature-Input`. Some infrastructure uses the ordinary `Signature` fields for its own identity; http-ctl does not assume those fields reach the application unchanged. The server maps only the two application-owned fields into the RFC 9421 library, without changing their values or the signed method, target URI, digest, content type, parameters, or replay checks. Ordinary `Signature`/`Signature-Input` fields never authenticate a request and are not a fallback.
