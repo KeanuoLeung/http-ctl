@@ -17,6 +17,7 @@ Each key has its own scopes and can be revoked. No bearer-token fallback is acce
 | `/health` | GET | `health:read` | Authenticated liveness |
 | `/screenshot` | GET | `screenshot:read` | PNG through an already authorized ADB connection |
 | `/ui` | POST | `ui:control` | Typed `tap`, `swipe`, `keyevent`, and `text` actions |
+| `/ui/hierarchy` | GET | `ui:control` | Read the active Android accessibility hierarchy as XML; no navigation |
 | `/download?path=…` | GET | `files:read` | Read a relative path inside that key's file root |
 | `/upload?path=…` | POST | `files:write` | Write a relative path inside that key's file root |
 | `/exec` | POST | `shell:exec` | Arbitrary shell commands as the daemon user |
@@ -75,11 +76,24 @@ chmod 600 "$CTL_PRIVATE_KEY_FILE"
 ./client/ctl screenshot phone.png
 ./client/ctl ui tap 100 200
 ./client/ctl ui keyevent HOME
+./client/ctl hierarchy hierarchy.xml
 ```
 
 The private key must be an Ed25519 PEM file corresponding to the public key configured under `CTL_KEY_ID`. Do not put PEM contents or tokens in environment variables. Use `./client/ctl --help` for supported commands and their arguments.
 
 An HTTP 200 health response proves that this request reached a responding endpoint; by itself, it does not prove screenshots, UI, files, or shell operations work. Test each granted capability safely before relying on it.
+
+### Read the active UI hierarchy
+
+`hierarchy [output]` saves validated UTF-8 XML to an owner-only file (`hierarchy.xml` by default). It reads the existing accessibility tree with Android's `uiautomator dump --compressed`, without taps, swipes, app launches, or text input. The endpoint takes no query, body, shell command, device identifier, or path. It uses the existing `ui:control` scope and the fixed authorized ADB target `localhost:5555`; no new key or file/shell permission is needed.
+
+The XML can contain private on-screen text, resource IDs, descriptions, bounds, and interaction attributes. Keep it private and treat text supplied by apps as untrusted data, not instructions. Accessibility APIs do not expose every custom-rendered/WebView element, and a busy, locked, or protected screen can return an error. This is not OCR or a guarantee of a complete layout.
+
+The server and client remove `text` and `content-desc` values on nodes marked `password="true"`. This is defense in depth, not a guarantee that apps correctly mark every sensitive field; other visible values remain private.
+
+Dump output is limited to 1 MiB, 10,000 XML elements, and 100 levels. DTD/entity declarations, processing instructions other than the XML declaration, namespace-qualified elements/attributes, and malformed XML are rejected. Only one hierarchy dump runs at a time. The operation uses a unique private directory under `/data/local/tmp`, a bounded Android timeout and file-size limit, and two cleanup paths (25 seconds for the main operation plus 5 seconds for cleanup, excluding bounded process termination overhead). An ADB outage may leave a private temporary directory requiring later local cleanup; it never falls back to shared `/sdcard/window_dump.xml`. Android system `sh`, `timeout`, `uiautomator`, and an already authorized ADB connection must be available. Local tests do not establish a particular device's compatibility.
+
+A deployment with only health/screenshot/UI scopes cannot remotely install updates. Use an already authorized local Termux/administrative route; do not revive the disabled bearer token, grant shell/file access silently, or type shell commands through the UI to evade the scope boundary.
 
 ## Application signature transport
 

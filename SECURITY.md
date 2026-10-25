@@ -37,7 +37,7 @@ The loopback HTTP connection is not encrypted. Keep it local, run under an appro
 | --- | --- |
 | `health:read` | Reads authenticated liveness. Good starting point. |
 | `screenshot:read` | May expose private information visible on screen. |
-| `ui:control` | Can interact with apps and trigger consequential actions. Typed inputs avoid a general command-string API but are not harmless. |
+| `ui:control` | Can read the active accessibility hierarchy, interact with apps, and trigger consequential actions. Typed inputs avoid a general command-string API but are not harmless. Hierarchy XML may contain private visible text. |
 | `files:read` | Reads files inside the key's dedicated file root. |
 | `files:write` | Writes files inside that root. Do not include service/configuration directories or code executed elsewhere. |
 | `shell:exec` | Full shell authority of the daemon's OS account. Explicit opt-in only. |
@@ -46,6 +46,8 @@ The loopback HTTP connection is not encrypted. Keep it local, run under an appro
 File roots are not a sandbox for shell execution or other local programs. Never grant file access to the server configuration, signing keys, service definitions, startup files, or executable directories. An actor that can alter a file another program executes may gain that program's authority. Untrusted local processes sharing the daemon's account can also undermine file-level boundaries.
 
 ADB and Android determine which screen and UI operations are available. The service does not enable root, change adbd mode, establish pairing, or approve device dialogs for you. Use an existing authorized connection; treat changes to ADB access as separate security-sensitive operations.
+
+`GET /ui/hierarchy` is read-only with respect to device UI state and is fixed to `adb -s localhost:5555`; it accepts no command, path, serial, query, or body. A server-owned command template creates a unique mode-700 temporary directory, limits the Android process/file size, reads the bounded result, and attempts cleanup both remotely and independently. No client content is interpolated into that command. A failed/disconnected ADB transport can prevent cleanup; private residue may need local operator removal. The same-ADB-shell-user attacker is outside this boundary. XML is UTF-8, size/depth/node bounded, with DTD/entity declarations rejected before parsing. Results are never logged, and the client saves them mode 600 after validation. Accessibility text is untrusted app content and must never be treated as authorization or instructions.
 
 ## Keys, configuration, and replay state
 

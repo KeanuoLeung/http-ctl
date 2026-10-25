@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .auth import protected_read, signed_headers, origin
-from .operations import MAX_FILE
+from .operations import MAX_FILE, validate_hierarchy
 
 MAX_RESPONSE = MAX_FILE + 65536
 
@@ -70,6 +70,8 @@ def parser():
     exe.add_argument('timeout', nargs='?', type=int, default=60)
     shot = sub.add_parser('screenshot')
     shot.add_argument('output', nargs='?', default='screenshot.png')
+    hierarchy = sub.add_parser('hierarchy', help='read the active Android accessibility hierarchy without navigation')
+    hierarchy.add_argument('output', nargs='?', default='hierarchy.xml')
     down = sub.add_parser('download')
     down.add_argument('remote', help='relative to the key file root')
     down.add_argument('output', nargs='?')
@@ -128,6 +130,10 @@ def main(argv=None):
                 output = args.output or pathlib.PurePosixPath(args.remote).name
         elif operation == 'screenshot':
             output = args.output
+        elif operation == 'hierarchy':
+            if not args.output:
+                raise ValueError('hierarchy output required')
+            target, output = '/ui/hierarchy', args.output
         headers = signed_headers(private, key_id, base, method, target, body, content_type)
         if operation == 'health-probe':
             # Use exclusive creation so no accidental overwrite of key/config files.
@@ -140,6 +146,8 @@ def main(argv=None):
         if output:
             if operation == 'screenshot' and not data.startswith(b'\x89PNG\r\n\x1a\n'):
                 raise ValueError('invalid screenshot response')
+            if operation == 'hierarchy':
+                data = validate_hierarchy(data)
             atomic_output(output, data)
             print('Saved response (%d bytes).' % len(data))
         else:

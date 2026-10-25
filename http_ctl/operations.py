@@ -1,5 +1,6 @@
 """Bounded subprocesses and descriptor-relative file access."""
 import os
+import re
 import selectors
 import shlex
 import signal
@@ -7,9 +8,103 @@ import stat
 import subprocess
 import time
 import uuid
+import xml.etree.ElementTree as ET
 
 MAX_FILE = 50 * 1024 * 1024
 MAX_OUTPUT = 100_000
+MAX_HIERARCHY = 1024 * 1024
+
+
+def validate_hierarchy(data):
+    """Accept only bounded UTF-8 UIAutomator XML, never DTDs or entities."""
+    if not isinstance(data, bytes) or not data or len(data) > MAX_HIERARCHY:
+        raise ValueError('invalid hierarchy')
+    text = data.decode('utf-8', 'strict')
+    # UIAutomator emits neither declarations other than XML nor comments.
+    # Reject before parsing so entity expansion/external resolution is impossible.
+    if '<!' in text or '\x00' in text:
+        raise ValueError('invalid hierarchy')
+    remaining = text.removeprefix('\ufeff')
+    if remaining.startswith('<?xml '):
+        declaration, separator, remaining = remaining.partition('?>')
+        if not separator or len(declaration) > 256:
+            raise ValueError('invalid hierarchy')
+        encoding = re.search(r'\bencoding\s*=\s*([\"\'])(.*?)\1', declaration)
+        if encoding and encoding[2].lower() != 'utf-8':
+            raise ValueError('invalid hierarchy')
+    if '<?' in remaining:
+        raise ValueError('invalid hierarchy')
+    try:
+        root = ET.fromstring(text)
+    except (ET.ParseError, ValueError):
+        raise ValueError('invalid hierarchy') from None
+    if root.tag != 'hierarchy':
+        raise ValueError('invalid hierarchy')
+    pending = [(root, 0)]
+    count = 0
+    redacted = False
+    while pending:
+        node, depth = pending.pop()
+        count += 1
+        if count > 10000 or depth > 100 or (node is not root and node.tag != 'node'):
+            raise ValueError('invalid hierarchy')
+        if (node.text and node.text.strip()) or (node.tail and node.tail.strip()):
+            raise ValueError('invalid hierarchy')
+        if any('{' in name or ':' in name for name in node.attrib):
+            raise ValueError('invalid hierarchy')
+        if node.get('password', '').lower() == 'true':
+            for name in ('text', 'content-desc'):
+                if node.get(name):
+                    node.set(name, '')
+                    redacted = True
+        pending.extend((child, depth + 1) for child in node)
+    if redacted:
+        data = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+        if len(data) > MAX_HIERARCHY:
+            raise ValueError('invalid hierarchy')
+    return data
+
+
+def ui_hierarchy(adb):
+    """Read the active Android hierarchy using one fixed, bounded operation.
+
+    No request content enters the script or path. Private remote temporary files
+    are cleaned by a trap and an independent, bounded cleanup attempt. An ADB
+    outage may prevent cleanup; an operator can remove the private residue later.
+    """
+    directory = '/data/local/tmp/http-ctl-ui-' + uuid.uuid4().hex
+    marker = '.owned-' + uuid.uuid4().hex
+    argv = [adb, '-s', 'localhost:5555', 'exec-out', 'sh', '-c']
+    # Android's sh/timeout/uiautomator are existing system tools, not installers.
+    # The remote file-size limit is at most 1 MiB (shell units may be 512 bytes).
+    script = '\n'.join([
+        'umask 077', 'd=' + shlex.quote(directory), 'marker=' + shlex.quote(marker),
+        'mkdir -m 700 "$d" || exit 1',
+        '(set -C; : > "$d/$marker") || exit 1',
+        'cleanup() { rm -f "$d/hierarchy.xml" "$d/$marker"; rmdir "$d"; }',
+        'trap cleanup EXIT', "trap 'exit 1' HUP INT TERM",
+        'ulimit -f 1024 || exit 1',
+        'timeout -s KILL 20 uiautomator dump --compressed "$d/hierarchy.xml" >/dev/null 2>/dev/null || exit 1',
+        'test -f "$d/hierarchy.xml" && test ! -L "$d/hierarchy.xml" || exit 1',
+        'cat "$d/hierarchy.xml"',
+    ])
+    cleanup = '\n'.join([
+        'd=' + shlex.quote(directory), 'marker=' + shlex.quote(marker),
+        'if test -d "$d" && test ! -L "$d"; then',
+        '  test -f "$d/$marker" && test ! -L "$d/$marker" || exit 1',
+        '  rm -f "$d/hierarchy.xml" "$d/$marker" && rmdir "$d"',
+        'else test ! -e "$d" && test ! -L "$d"; fi',
+    ])
+    try:
+        code, out, _, timed, truncated = run_bounded(argv + [shlex.quote(script)], 25, output_limit=MAX_HIERARCHY)
+        if code or timed or truncated:
+            raise ValueError('hierarchy unavailable')
+        result = validate_hierarchy(out)
+    finally:
+        code, _, _, timed, truncated = run_bounded(argv + [shlex.quote(cleanup)], 5, output_limit=4096)
+        if code or timed or truncated:
+            raise ValueError('hierarchy cleanup unavailable')
+    return result
 
 
 def run_bounded(argv, timeout, output_limit=MAX_OUTPUT, env=None):

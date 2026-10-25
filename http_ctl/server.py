@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .auth import AuthError, Config, ReplayStore, authenticate, strict_json
 from .rollout import confirm, RolloutUnavailable
-from .operations import MAX_FILE, download, upload, run_bounded, ui_arguments
+from .operations import MAX_FILE, download, upload, run_bounded, ui_arguments, ui_hierarchy
 
 ROUTES = {
     ('GET', '/health'): ('health:read', 0, 'application/octet-stream'),
@@ -21,6 +21,7 @@ ROUTES = {
     ('POST', '/upload'): ('files:write', MAX_FILE, 'application/octet-stream'),
     ('POST', '/exec'): ('shell:exec', 65536, 'application/json'),
     ('POST', '/ui'): ('ui:control', 4096, 'application/json'),
+    ('GET', '/ui/hierarchy'): ('ui:control', 0, 'application/octet-stream'),
     ('POST', '/migration/confirm'): ('migration:confirm', 512, 'application/json'),
 }
 
@@ -53,6 +54,7 @@ class Server(ThreadingHTTPServer):
         self.replay = ReplayStore(config.replay_db)
         self.slots = threading.BoundedSemaphore(8)
         self.operation_slots = threading.BoundedSemaphore(2)
+        self.hierarchy_slot = threading.BoundedSemaphore(1)
         self.bucket = Bucket(10, 30)
         self.key_buckets = {}
         self.key_bucket_lock = threading.Lock()
@@ -312,6 +314,17 @@ class Handler(BaseHTTPRequestHandler):
         else:
             if not self.server.adb:
                 return self._json(501, {'error': 'adb unavailable'})
+            if path == '/ui/hierarchy':
+                if not self.server.hierarchy_slot.acquire(blocking=False):
+                    return self._json(503, {'error': 'busy'})
+                try:
+                    try:
+                        data = ui_hierarchy(self.server.adb)
+                    except (OSError, ValueError):
+                        return self._json(502, {'error': 'hierarchy failed'})
+                finally:
+                    self.server.hierarchy_slot.release()
+                return self._send(200, data, 'application/xml; charset=utf-8')
             argv = [self.server.adb, '-s', self.server.config.adb_serial]
             if path == '/screenshot':
                 code, out, _, timed, truncated = run_bounded(argv + ['exec-out', 'screencap', '-p'], 30, output_limit=16 * 1024 * 1024)
