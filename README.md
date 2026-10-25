@@ -1,121 +1,127 @@
 # http-ctl
 
-HTTP control service for machines that sandboxed AI agents cannot SSH into.
+An authenticated HTTP control service for a machine you own or are authorized to administer. The daemon listens on loopback; an existing HTTPS reverse proxy or tunnel can make it reachable by an authorized client.
 
-## The problem
+**Version 2 replaces bearer tokens with Ed25519 HTTP Message Signatures. It is not wire-compatible with the old token client.** Do not replace a working deployment in place. Follow the [staged migration guide](examples/termux-phone.md), keep an independent recovery path, and make the final switch only after testing the signed client.
 
-Agent runtimes such as Muse or ChatGPT Dot often run behind an egress
-HTTP proxy that MITMs TLS and blocks direct SSH. Go-based tunnel clients
-(cloudflared, Tailscale, ...) can fail there too, because the proxy
-rejects their TLS handshake fingerprint. What does pass is ordinary
-HTTPS from a normal TLS stack: curl, OpenSSL, Python requests.
+This project does not bypass a platform's sandbox, network controls, permissions, or approval requirements. Android permissions and ADB authorization still apply.
 
-So instead of the agent pushing SSH into a machine, the machine exposes
-a small HTTP control service on loopback only, a tunnel maps a public
-HTTPS hostname to it, and the agent talks to that hostname with curl
-plus a bearer token.
+## Authentication and capabilities
 
-```
-agent VM --(HTTPS via egress proxy)--> tunnel edge --(tunnel)--> machine
-        curl + Bearer token                       loopback daemon
-                                                     /exec /health ...
-```
+Requests use [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html), with signature construction and parsing provided by the pinned `http-message-signatures==2.0.1` dependency. The application computes and verifies the SHA-256 [RFC 9530 Content-Digest](https://www.rfc-editor.org/rfc/rfc9530.html) and signs that header as part of its required profile. The server stores public keys only. Private signing keys remain on the trusted client.
 
-No SSH from the agent side. No Go-TLS handshake from the agent side.
-Nothing for the egress proxy to block.
+Each key has its own scopes and can be revoked. No bearer-token fallback is accepted.
 
-## What you get
+| Endpoint | Method | Required scope | Purpose |
+| --- | --- | --- | --- |
+| `/health` | GET | `health:read` | Authenticated liveness |
+| `/screenshot` | GET | `screenshot:read` | PNG through an already authorized ADB connection |
+| `/ui` | POST | `ui:control` | Typed `tap`, `swipe`, `keyevent`, and `text` actions |
+| `/download?path=…` | GET | `files:read` | Read a relative path inside that key's file root |
+| `/upload?path=…` | POST | `files:write` | Write a relative path inside that key's file root |
+| `/exec` | POST | `shell:exec` | Arbitrary shell commands as the daemon user |
+| `/migration/confirm` | POST | `migration:confirm` | Accept one bounded rollout; disabled outside migration |
 
-A single-file, stdlib-only Python daemon (`server/ctl-server.py`) with
-five endpoints, all behind the bearer token:
+`ui:control` can still perform consequential actions on an unlocked device. `shell:exec` intentionally gives broad shell access and is not constrained by the file root. Start with `health:read`, then grant only the capabilities you actually need. `migration:confirm` is a temporary migration-only capability, not a permanent administrative API.
 
-| Endpoint | Method | What it does |
-|---|---|---|
-| `/health` | GET | Liveness: ok + uptime |
-| `/exec` | POST | Run a shell command, return exit/stdout/stderr (timeout, output caps) |
-| `/screenshot` | GET | PNG screenshot via adb (Android hosts; 501 elsewhere) |
-| `/download?path=` | GET | Download a file from the machine |
-| `/upload?path=` | POST | Upload a file to the machine (raw body) |
+## Fresh installation
 
-And a small bash client (`client/ctl`) that wraps curl:
+These are operator instructions, not evidence that a particular phone has been deployed or tested. Read [SECURITY.md](SECURITY.md) first. For an existing installation, use [the migration procedure](examples/termux-phone.md) instead.
 
-```bash
-export CTL_BASE_URL=https://ctl.example.com
-ctl health
-ctl exec "uptime; df -h" 60
-ctl exec "adb -s localhost:5555 shell dumpsys battery"
-ctl screenshot phone.png
-ctl download /remote/log.txt
-ctl upload ./script.sh /home/user/script.sh
-```
+### Server
 
-## Quickstart
+1. Review the code and dependencies. Use a dedicated, unprivileged account and a private configuration directory.
+2. On ordinary Linux, create a virtual environment and install the pinned requirements:
 
-### On the machine to be controlled
+   ```sh
+   python3 -m venv .venv
+   .venv/bin/python -m pip install -r requirements.txt
+   ```
 
-1. Copy `server/ctl-server.py` somewhere, e.g. `/opt/http-ctl/`.
-2. Generate a token and store it with mode 600:
+   On Termux, install Python and `python-cryptography` from the official Termux repository, then use `python3 -m venv --system-site-packages .venv`. See the [Termux guide](examples/termux-phone.md); do not rely on Linux manylinux wheels on Android.
+3. Arrange an authorized Ed25519 signing key on the trusted client. Key creation and granting persistent access require the owner's explicit approval. Transfer **only the public key** to the server. Do not copy the private key to the phone, a tunnel provider, logs, or chat.
+4. Copy [`examples/server.example.json`](examples/server.example.json) to `~/.config/http-ctl/server.json`, replace the placeholders, and restrict access:
 
-   ```bash
+   ```sh
    mkdir -p ~/.config/http-ctl
-   openssl rand -hex 32 > ~/.config/http-ctl/token
-   chmod 600 ~/.config/http-ctl/token
+   chmod 700 ~/.config/http-ctl
+   chmod 600 ~/.config/http-ctl/server.json
    ```
 
-3. Run the daemon (it binds 127.0.0.1 only and refuses to start
-   without the token file):
+   Set `external_origin` to the exact public HTTPS origin, for example `https://ctl.example.com`, with no path or trailing slash. This is the signing origin, not the loopback transport address. Start with a `health:read` key. A key with file scopes also needs an existing absolute `file_root` dedicated to permitted files.
+5. From the repository root, start the server:
 
-   ```bash
-   python3 /opt/http-ctl/ctl-server.py
+   ```sh
+   export CTL_CONFIG_FILE="$HOME/.config/http-ctl/server.json"
+   export CTL_HOST=127.0.0.1
+   export CTL_PORT=18081
+   .venv/bin/python -m http_ctl.server
    ```
 
-   For persistence use the systemd unit in `examples/systemd/` or the
-   runit script in `examples/runit/` — both restart it on crash/boot.
-4. Expose it through a tunnel that terminates TLS, e.g. Cloudflare
-   Tunnel: add an ingress rule `ctl.example.com -> http://127.0.0.1:18081`
-   and the matching DNS record. **Never expose the daemon port
-   directly to the internet** — the token is the only auth, and the
-   daemon speaks plain HTTP on loopback by design.
+   The public endpoint must use HTTPS. Forward only the intended hostname and preserve the request path, query, signed headers, and body. Do not expose port 18081 directly. Changes to a tunnel, DNS, firewall, permissions, or service persistence need their own approval.
 
-### On the agent side
+### Client
 
-1. Copy `client/ctl` somewhere on PATH and make it executable.
-2. Copy the token into `~/.config/http-ctl/token` (mode 600).
-3. `export CTL_BASE_URL=https://ctl.example.com` and run `ctl health`.
+Install the same checkout and dependencies on the trusted client. `client/ctl` is a wrapper for the Python signed client; keep it with the package or invoke `python3 -m http_ctl.client` from the repository root.
 
-## Security
-
-Read `SECURITY.md` before deploying. The short version:
-
-- The token is equivalent to an SSH private key. Anyone with it gets
-  full shell on the machine. Guard it like one; rotate by replacing
-  the token file on both sides and restarting the daemon.
-- The daemon binds loopback only and speaks plain HTTP; TLS comes
-  from the tunnel. If you expose the port without a tunnel, the token
-  travels in cleartext.
-- The sandbox egress operator can see the token in transit (it MITMs
-  TLS by design). This protects against the open internet, not
-  against the sandbox itself.
-- There is no rate limiting beyond the 256-bit token entropy; keep
-  the token random and do not reuse it across machines.
-
-## Layout
-
-```
-server/ctl-server.py        the daemon (stdlib only)
-client/ctl                  bash + curl client
-examples/systemd/           systemd unit for generic Linux servers
-examples/runit/             runit run script (Termux / Void / etc.)
-examples/termux-phone.md    worked deployment: an Android phone
-                            controlled from a sandboxed agent VM
-SECURITY.md                 threat model and operating rules
+```sh
+. .venv/bin/activate
+export CTL_BASE_URL=https://ctl.example.com
+export CTL_KEY_ID=my-client-readonly
+export CTL_PRIVATE_KEY_FILE="$HOME/.config/http-ctl/client-ed25519.pem"
+chmod 600 "$CTL_PRIVATE_KEY_FILE"
+./client/ctl health
+# Only after granting the corresponding scope:
+./client/ctl screenshot phone.png
+./client/ctl ui tap 100 200
+./client/ctl ui keyevent HOME
 ```
 
-## First deployment
+The private key must be an Ed25519 PEM file corresponding to the public key configured under `CTL_KEY_ID`. Do not put PEM contents or tokens in environment variables. Use `./client/ctl --help` for supported commands and their arguments.
 
-This project was built for a real case: a Pixel 4 (Termux + proot
-Ubuntu) controlled from a Muse VM whose egress proxy blocks SSH and
-Go-TLS. The phone deployment — runit service, boot hook, Cloudflare
-Tunnel hostname, and the exact verification steps — is documented in
-`examples/termux-phone.md`. It is the reference for "does this
-actually work through a hostile egress".
+An HTTP 200 health response proves that this request reached a responding endpoint; by itself, it does not prove screenshots, UI, files, or shell operations work. Test each granted capability safely before relying on it.
+
+## Application signature transport
+
+The client sends its signature in `X-Http-Ctl-Signature` and `X-Http-Ctl-Signature-Input`. Some infrastructure uses the ordinary `Signature` fields for its own identity; http-ctl does not assume those fields reach the application unchanged. The server maps only the two application-owned fields into the RFC 9421 library, without changing their values or the signed method, target URI, digest, content type, parameters, or replay checks. Ordinary `Signature`/`Signature-Input` fields never authenticate a request and are not a fallback.
+
+This is an application-specific transport profile using RFC 9421 signature construction, not wire interoperability with generic RFC 9421 clients. Both application fields are required; duplicates and ambiguity are rejected. A network intermediary can still alter or remove them, causing safe rejection, but cannot make a modified request pass without the private key. Local audit logs contain only fixed failure categories, never header values, signatures, nonces, key identifiers, bodies, or exception details. Public authentication failures remain generic HTTP 401.
+
+## Configuration
+
+| Setting | Meaning |
+| --- | --- |
+| `CTL_CONFIG_FILE` | Server JSON file; default `~/.config/http-ctl/server.json` |
+| `CTL_HOST` | Must be `127.0.0.1` |
+| `CTL_PORT` | Local port; default `18081`, staged migration uses `18082` |
+| `external_origin` | Exact public HTTPS origin used to verify the signed target URI |
+| `keys` | Object mapping key IDs to `public_key_pem`, `scopes`, `revoked`, and optional `file_root` |
+| `replay_db` | Persistent SQLite nonce database in a private local state directory |
+| `CTL_BASE_URL` | Client HTTPS origin, matching `external_origin` |
+| `CTL_KEY_ID` | Client's configured key ID |
+| `CTL_PRIVATE_KEY_FILE` | Client-only Ed25519 private-key PEM path |
+
+Omitting `replay_db` uses the server's private state default. Keep its directory private and its database persistent across restarts; do not delete it while signatures could still be valid. Key entries are reloaded for each newly authenticated request, so an atomic key update or revocation applies without a restart. An already authorized in-flight request may finish. Changing the origin, replay database, or ADB selection requires a restart; changing them live fails closed.
+
+## Security boundaries
+
+- Signatures bind the method, full configured target URI, content type, content digest, and signature parameters. The server enforces expiry and persistent nonce replay checks.
+- An intercepting TLS proxy can still read requests and responses, suppress traffic, alter **unsigned responses**, or race the original signed request. It cannot forge a modified signed request or derive the private key merely by observing traffic.
+- Request signatures are not end-to-end encryption, response authentication, or protection from a compromised client. HTTPS and a trustworthy response path are still needed.
+- Relative file paths are confined to each key's configured root. This does not constrain `/exec`, ADB itself, or other software running as the same OS account.
+- No tool or network path authorizes actions beyond the machine owner's permission or the assistant platform's policies.
+
+## Repository layout
+
+```text
+http_ctl/                       v2 server, signed client, and probe helper
+client/ctl                      signed-client launcher
+examples/server.example.json   least-privilege configuration template
+examples/runit/                 service templates
+examples/systemd/               Linux service template
+examples/termux-phone.md         staged phone migration and verification
+examples/termux-phone-deploy.sh local-only stage/verify/cutover/rollback tool
+SECURITY.md                      threat model and operational guidance
+```
+
+A device-specific installation is successful only after the signed public health check, required capability tests, service-restart check, and a review of the rollback path. Local tests alone do not establish phone compatibility.

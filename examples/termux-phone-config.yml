@@ -1,28 +1,8 @@
-tunnel: c541c93c-47b5-4298-bda5-84b7ddcba43e
-credentials-file: /data/data/com.termux/files/home/.cloudflared/pixel-tunnel.json
-protocol: http2
-edge-ip-version: '4'
-ha-connections: 2
-metrics: 127.0.0.1:2000
-loglevel: info
-grace-period: 5s
+# Illustrative tunnel ingress fragment, not a deployable full configuration.
+# Replace placeholders inside your own existing configuration only with approval.
+# Do not overwrite unrelated ingress rules, credentials, DNS, or service settings.
+# This points to production, NOT the staging listener on 18082.
 ingress:
-  - hostname: web.0xsatori.biz
-    service: http://127.0.0.1:8090
-  - hostname: pixel.0xsatori.biz
-    path: /web*
-    service: http://127.0.0.1:8090
-  - hostname: pixel.0xsatori.biz
-    path: /web.*
-    service: http://127.0.0.1:8090
-  - hostname: pixel.0xsatori.biz
-    service: http://127.0.0.1:8080
-    originRequest:
-      connectTimeout: 10s
-  - hostname: ctl.0xsatori.biz
+  - hostname: ctl.example.com
     service: http://127.0.0.1:18081
-  - hostname: ssh.pixel.0xsatori.biz
-    service: ssh://127.0.0.1:8022
-  - hostname: ssh-pixel.0xsatori.biz
-    service: ssh://127.0.0.1:8022
   - service: http_status:404

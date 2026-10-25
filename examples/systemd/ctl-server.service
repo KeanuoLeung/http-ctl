@@ -1,19 +1,28 @@
 [Unit]
-Description=http-ctl control daemon
+Description=http-ctl signed-request control daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=YOUR_USER
-ExecStart=/usr/bin/python3 /opt/http-ctl/ctl-server.py
+Group=YOUR_GROUP
+WorkingDirectory=/opt/http-ctl/release
+ExecStart=/opt/http-ctl/release/.venv/bin/python -m http_ctl.server
 Environment=CTL_HOST=127.0.0.1
 Environment=CTL_PORT=18081
-Environment=CTL_TOKEN_FILE=/home/YOUR_USER/.config/http-ctl/token
-Restart=always
+Environment=CTL_CONFIG_FILE=/home/YOUR_USER/.config/http-ctl/server.json
+Environment=HOME=/home/YOUR_USER
+UMask=0077
+Restart=on-failure
 RestartSec=5
-# The daemon binds loopback only; no network-facing hardening needed
-# beyond running as an unprivileged user. Keep the token file 600.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# Deliberately do not promise a complete sandbox. Review privileges for the
+# selected scopes. NoNewPrivileges blocks privilege escalation through /exec.
+# Do not enable/start this alongside an existing daemon on the same port.
+# Preserve existing logs and configure external rate limiting as appropriate.
 
 [Install]
 WantedBy=multi-user.target

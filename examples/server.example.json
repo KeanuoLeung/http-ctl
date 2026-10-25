@@ -1,0 +1,10 @@
+{
+  "external_origin": "https://ctl.example.com",
+  "keys": {
+    "my-client-readonly": {
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_YOUR_AUTHORIZED_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n",
+      "scopes": ["health:read"],
+      "revoked": false
+    }
+  }
+}

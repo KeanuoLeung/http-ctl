@@ -1,0 +1,5 @@
+http-message-signatures==2.0.1
+# Prefer the maintained OS package on Termux; this is the compatible API floor.
+cryptography>=41.0.0,<51
+
+typing-extensions>=4.12,<5
