@@ -30,7 +30,7 @@ SIGNATURE_HEADER = 'X-Http-Ctl-Signature'
 SIGNATURE_INPUT_HEADER = 'X-Http-Ctl-Signature-Input'
 MAX_AGE = 60
 SKEW = 5
-SCOPES = frozenset({'health:read', 'screenshot:read', 'ui:control', 'files:read', 'files:write', 'shell:exec', 'migration:confirm'})
+SCOPES = frozenset({'health:read', 'screenshot:read', 'ui:control', 'files:read', 'files:write', 'shell:exec', 'migration:confirm', 'ssh:connect'})
 KEY_ID = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
 NONCE = re.compile(r'[A-Za-z0-9_-]{22,128}\Z')
 

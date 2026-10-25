@@ -41,11 +41,55 @@ The loopback HTTP connection is not encrypted. Keep it local, run under an appro
 | `files:read` | Reads files inside the key's dedicated file root. |
 | `files:write` | Writes files inside that root. Do not include service/configuration directories or code executed elsewhere. |
 | `shell:exec` | Full shell authority of the daemon's OS account. Explicit opt-in only. |
+| `ssh:connect` | Opens the optional fixed-loopback SSH transport. Inner SSH host verification, user authentication, account permissions, subsystems, and forwarding policy still apply. Never granted implicitly by `shell:exec`. |
 | `migration:confirm` | Temporary acceptance of one bounded rollout after external tests. Disabled by default and removed on completion. |
 
 File roots are not a sandbox for shell execution or other local programs. Never grant file access to the server configuration, signing keys, service definitions, startup files, or executable directories. An actor that can alter a file another program executes may gain that program's authority. Untrusted local processes sharing the daemon's account can also undermine file-level boundaries.
 
 ADB and Android determine which screen and UI operations are available. The service does not enable root, change adbd mode, establish pairing, or approve device dialogs for you. Use an existing authorized connection; treat changes to ADB access as separate security-sensitive operations.
+
+### Retained asynchronous jobs
+
+The `/jobs/*` endpoints use the existing `shell:exec` authority and authenticate
+every request. Job ownership is the key **ID**, so do not reuse a retired key ID
+for an unrelated principal: it would inherit that ID's retained history. Revoking
+a key blocks subsequent API access but does not retroactively stop an already
+admitted command. An administrator must separately decide whether to cancel it.
+
+Job logs intentionally persist command output in private local files, distinct
+from the content-free service audit log. Output may contain secrets or personal
+data; do not publish it or include it in diagnostic bundles. Metadata contains a
+command fingerprint, not the command text. A fingerprint is not anonymization
+for easily guessed commands. Local processes with the same OS identity are
+outside this protection, just as they are for the existing shell API.
+
+Admission is durable before spawn and IDs are never automatically recycled.
+After a hard crash, `interrupted` is an uncertain outcome, not proof that the
+command did not run or has stopped. The next daemon never automatically reruns
+it. Normal shutdown terminates owned process groups; a deliberately detached
+descendant or hard crash is not a process-containment guarantee. The 128 retained
+record limit refuses new admissions instead of silently losing deduplication.
+
+### Optional SSH transport
+
+The SSH bridge is a separately started module and requires a separately granted
+`ssh:connect` scope. Merely upgrading the HTTP package must not start it, add a
+public route, enable sshd, install a key, or alter an existing user's scopes.
+Deploying any of those changes requires its own authorized configuration step.
+
+This module forwards an opaque SSH byte stream only to an operator-configured
+literal loopback destination. Clients cannot select another address or port.
+Do not replace the backend with a generic proxy, and do not disable SSH host-key
+checking. The outer HTTP signing identity and inner SSH login identity serve
+different purposes; do not automatically copy or reuse their private keys.
+
+Unlike the ordinary JSON API, a correctly host-authenticated inner SSH session
+retains its SSH encryption through the HTTPS terminator. The terminator can still
+observe timing and sizes, drop connections, and see the outer handshake. This is
+not uninterrupted-session recovery: a broken WebSocket ends its SSH transport.
+Use an independently configured terminal multiplexer when persistence is needed.
+Connections arrive at sshd from loopback, so source-address-based SSH restrictions
+and logs do not represent the original client address.
 
 `GET /ui/hierarchy` is read-only with respect to device UI state and is fixed to `adb -s localhost:5555`; it accepts no command, path, serial, query, or body. A server-owned command template creates a unique mode-700 temporary directory, limits the Android process/file size, reads the bounded result, and attempts cleanup both remotely and independently. No client content is interpolated into that command. A failed/disconnected ADB transport can prevent cleanup; private residue may need local operator removal. The same-ADB-shell-user attacker is outside this boundary. XML is UTF-8, size/depth/node bounded, with DTD/entity declarations rejected before parsing. Results are never logged, and the client saves them mode 600 after validation. Accessibility text is untrusted app content and must never be treated as authorization or instructions.
 

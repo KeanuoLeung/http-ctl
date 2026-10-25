@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import threading
 import time
@@ -12,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .auth import AuthError, Config, ReplayStore, authenticate, strict_json
 from .rollout import confirm, RolloutUnavailable
+from .jobs import JobStore, JobError
 from .operations import MAX_FILE, download, upload, run_bounded, ui_arguments, ui_hierarchy
 
 ROUTES = {
@@ -19,6 +21,8 @@ ROUTES = {
     ('GET', '/screenshot'): ('screenshot:read', 0, 'application/octet-stream'),
     ('GET', '/download'): ('files:read', 0, 'application/octet-stream'),
     ('POST', '/upload'): ('files:write', MAX_FILE, 'application/octet-stream'),
+    **{('POST', '/jobs/' + action): ('shell:exec', 65536 if action == 'submit' else 1024, 'application/json')
+       for action in ('submit', 'status', 'logs', 'cancel')},
     ('POST', '/exec'): ('shell:exec', 65536, 'application/json'),
     ('POST', '/ui'): ('ui:control', 4096, 'application/json'),
     ('GET', '/ui/hierarchy'): ('ui:control', 0, 'application/octet-stream'),
@@ -62,6 +66,16 @@ class Server(ThreadingHTTPServer):
         self.adb = shutil.which('adb')
         self.bash = shutil.which('bash')
         super().__init__(address, Handler)
+        try:
+            self.jobs = JobStore(os.path.join(os.path.dirname(config.replay_db), 'jobs'))
+        except Exception:
+            super().server_close()
+            raise
+
+    def server_close(self):
+        if hasattr(self, 'jobs'):
+            self.jobs.close()
+        super().server_close()
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -273,6 +287,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(429, {'error': 'rate limited'})
         if parsed.path == '/health':
             return self._json(200, {'ok': True, 'service': 'http-ctl', 'version': 2, 'uptime_s': int(time.monotonic() - self.server.started)})
+        if parsed.path.startswith('/jobs/'):
+            try:
+                req = strict_json(body)
+                if parsed.path == '/jobs/submit':
+                    created, result = self.server.jobs.submit(key_id, req, self.server.bash)
+                    return self._json(202 if created else 200, result)
+                if parsed.path == '/jobs/logs':
+                    return self._json(200, self.server.jobs.logs(key_id, req))
+                if not isinstance(req, dict) or set(req) != {'id'}:
+                    raise ValueError('invalid job request')
+                operation = self.server.jobs.status if parsed.path == '/jobs/status' else self.server.jobs.cancel
+                return self._json(200, operation(key_id, req['id']))
+            except JobError as exc:
+                return self._json(exc.status, {'error': exc.message})
+            except (ValueError, UnicodeError, TypeError, KeyError, RecursionError):
+                return self._json(400, {'error': 'invalid job request'})
+            except OSError:
+                return self._json(503, {'error': 'job state unavailable'})
         if not self.server.operation_slots.acquire(blocking=False):
             return self._json(503, {'error': 'busy'})
         try:
@@ -345,6 +377,11 @@ def main():
         server = Server((os.environ.get('CTL_HOST', '127.0.0.1'), int(os.environ.get('CTL_PORT', '18081'))), config)
     except Exception:
         raise SystemExit('http-ctl: invalid configuration or unavailable listener/state; refusing to start')
+    # SIGTERM is the service-manager/update shutdown path too. Raising here
+    # lets the main-thread finally close jobs; shutdown() here would deadlock.
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, terminate)
     print('http-ctl v2 listening on loopback; signatures required', flush=True)
     try:
         server.serve_forever()

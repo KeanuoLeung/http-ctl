@@ -21,6 +21,10 @@ Each key has its own scopes and can be revoked. No bearer-token fallback is acce
 | `/download?path=…` | GET | `files:read` | Read a relative path inside that key's file root |
 | `/upload?path=…` | POST | `files:write` | Write a relative path inside that key's file root |
 | `/exec` | POST | `shell:exec` | Arbitrary shell commands as the daemon user |
+| `/jobs/submit` | POST | `shell:exec` | Admit a bounded asynchronous command with a caller-chosen ID |
+| `/jobs/status` | POST | `shell:exec` | Read that key's retained job state and output sizes |
+| `/jobs/logs` | POST | `shell:exec` | Read one output stream from a byte cursor |
+| `/jobs/cancel` | POST | `shell:exec` | Request termination of that key's active job |
 | `/migration/confirm` | POST | `migration:confirm` | Accept one bounded rollout; disabled outside migration |
 
 `ui:control` can still perform consequential actions on an unlocked device. `shell:exec` intentionally gives broad shell access and is not constrained by the file root. Start with `health:read`, then grant only the capabilities you actually need. `migration:confirm` is a temporary migration-only capability, not a permanent administrative API.
@@ -82,6 +86,112 @@ chmod 600 "$CTL_PRIVATE_KEY_FILE"
 The private key must be an Ed25519 PEM file corresponding to the public key configured under `CTL_KEY_ID`. Do not put PEM contents or tokens in environment variables. Use `./client/ctl --help` for supported commands and their arguments.
 
 An HTTP 200 health response proves that this request reached a responding endpoint; by itself, it does not prove screenshots, UI, files, or shell operations work. Test each granted capability safely before relying on it.
+
+### Shell-friendly execution results
+
+`ctl exec 'command'` keeps its JSON output, but now returns the **remote command's
+exit status**, rather than reporting success for every HTTP 200 response. Existing
+scripts that ignored the JSON `exit` field may now correctly stop on failures.
+Use `ctl exec --raw 'command'` to write decoded command stdout and stderr to the
+corresponding local streams. The legacy exec API is text-only, not a binary pipe.
+
+Remote exits 0–255 are preserved; termination by signal N maps to 128+N. A timed
+out execution returns 124, output-limit termination returns 125, and a transport,
+HTTP, or invalid-response failure returns 255. Local configuration failures return
+1. These values can overlap genuine command exit codes; JSON fields and static
+client diagnostics distinguish the cause. Timeout takes priority over truncation.
+HTTP errors identify the status without echoing potentially sensitive response
+bodies. The client never retries an operation automatically.
+
+The existing `/exec` operation remains bounded to 300 seconds and 100,000 bytes
+per output stream; exceeding an output limit terminates its process group. Do not
+use it for package upgrades, builds, interactive programs, or long-running jobs
+whose output and duration are unknown.
+
+### Asynchronous commands and disconnect recovery
+
+```sh
+./client/ctl jobs submit --id build-20261025-01 'make test' --timeout 3600
+./client/ctl jobs status build-20261025-01
+./client/ctl jobs logs build-20261025-01 --stream stdout --cursor 0
+./client/ctl jobs logs build-20261025-01 --stream stderr --cursor 0 --raw
+./client/ctl jobs cancel build-20261025-01
+```
+
+Status commands return a successful CLI status when the query succeeds; inspect
+the JSON job `state` and `exit` to learn the command result. Cancellation is
+asynchronous: query until terminal state to confirm it. Each logs command returns
+one bounded page; continue from `next_cursor`. Raw mode writes the selected
+stream's binary bytes to local stdout. There is no implicit retry or follow loop.
+
+The jobs API separates a command's lifetime from an HTTP connection. Choose and
+retain a unique ID **before submitting**. Submit returns HTTP 202 for a new job
+and HTTP 200 for a matching existing job. If the connection drops, query that ID
+with `/jobs/status`; do not invent another ID and rerun the command. Repeating
+the same ID, command, and timeout under the same key returns the original job;
+using the ID with different input returns 409. Every HTTP request still needs a
+fresh signature and nonce. Transport replay prevention is not job deduplication.
+
+All four endpoints take JSON bodies and require `shell:exec`. Status and cancel
+accept `{"id":"my-job"}`. Submit adds `cmd` and optional `timeout` (1–3600 seconds,
+default 3600). Logs take `id`, `stream` (`stdout` or `stderr`), optional `cursor`
+(default 0) and `limit` (1–65536, default 65536). Log responses contain base64
+bytes, the next byte cursor, state, and an EOF flag. EOF means the stream is
+finished, not merely that no bytes are available at the moment. A key cannot
+query or cancel another key's jobs. New requests honor key revocation.
+
+This first implementation has explicit limits: two active jobs, 128 retained
+job IDs, and 1 MiB combined stdout/stderr per job. Exceeding the output quota
+terminates that job with state `output_limit`; it does not silently discard
+unbounded output. Jobs have separate capacity from the short-operation pool.
+They have no interactive stdin or PTY, and inherit only a small environment
+allowlist. Commands execute as the daemon's OS user, not in a new sandbox.
+
+Private metadata and logs are stored in `jobs/` beside the replay database.
+Admission is persisted before starting a command. A daemon restart marks
+previously active records `interrupted` and **never reexecutes them**. This is
+disconnect recovery and retained results, not restart-resumable computation or
+an exactly-once side-effect guarantee. After a hard crash, a detached descendant
+may still exist and the outcome may be unknown; inspect it before taking action.
+Do not automatically resubmit an interrupted command under a new ID.
+
+IDs are deliberately not silently expired or recycled. At the retention limit,
+new IDs are refused while existing records remain queryable. There is no remote
+purge operation in this release. Plan an explicit offline retention policy before
+using it as an unattended high-volume scheduler; deleting state also removes the
+deduplication history. Do not delete the replay database to make room for jobs.
+
+### Migration acceptance must include maintenance
+
+Before changing authentication or replacing a service, record the capabilities
+the owner actually needs and test them through the replacement client. A healthy
+endpoint plus successful screenshots is **not** sufficient acceptance for a
+machine that must remain remotely maintainable. Test an explicitly authorized,
+harmless shell command and the independent recovery route before retiring the old
+route. If a capability will intentionally be removed, obtain that decision before
+cutover. Do not silently grant new scopes or reinstate an old authentication mode.
+
+The current migration helper's signed health probe and confirmation watchdog do
+not mechanically enforce this capability checklist. The operator must verify it;
+do not treat a migration confirmation alone as evidence of shell/file access.
+
+`shell:exec` is an application API permission, not an Android/Linux user or root
+permission. Once authorized, commands run with the daemon's OS identity. This
+does not make the daemon root or grant Android/ADB capabilities it does not have.
+
+### Use standard Linux SSH clients (optional)
+
+The separate [SSH-over-HTTPS guide](examples/ssh-over-https.md) describes the
+optional fixed-loopback WebSocket bridge and Linux `ProxyCommand` helper. It uses
+real OpenSSH on both sides of an opaque transport instead of emulating SSH with
+the JSON API. After explicit setup, ordinary `ssh phone`, `scp` and `sftp` can use
+it, subject to the destination sshd's policies and OS capabilities.
+
+This requires `requirements-ssh.txt`, a separately granted `ssh:connect` scope,
+an existing authorized sshd, independently verified host keys, and an approved
+WebSocket route. None is enabled by the ordinary HTTP server or automatically
+granted by an upgrade. An HTTPS hostname alone is not an SSH listener. Do not
+disable SSH host-key checks or treat local transport tests as phone deployment.
 
 ### Read the active UI hierarchy
 

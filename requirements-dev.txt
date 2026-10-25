@@ -1,2 +1,2 @@
--r requirements.txt
+-r requirements-ssh.txt
 pytest>=8,<10
