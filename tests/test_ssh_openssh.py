@@ -90,7 +90,10 @@ def native_ssh():
             pytest.skip(f'isolated native SSH integration requires {command}')
     if not (ROOT / 'http_ctl/ssh_bridge.py').exists():
         pytest.skip('optional SSH bridge not installed')
-    with tempfile.TemporaryDirectory(prefix='http-ctl-openssh-') as directory:
+    # StrictModes checks the complete authorized-key path; /tmp is world
+    # writable on hosted runners. Keep the private fixture inside the checkout
+    # instead of weakening sshd ownership checks or changing system modes.
+    with tempfile.TemporaryDirectory(prefix='.http-ctl-openssh-', dir=ROOT) as directory:
         d = Path(directory)
         processes = []
         logs = []
